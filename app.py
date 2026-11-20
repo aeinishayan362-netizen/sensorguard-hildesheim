@@ -48,7 +48,7 @@ st.title('📡 SensorGuard Hildesheim')
 st.caption('Challenge 3 · Frühwarnsystem auf Basis der bereitgestellten Hackathon-Messdaten · historische Daten, keine Live-Stadtanbindung')
 d=load()
 maxdate=d['last'].max();mindate=d['first'].min()
-st.info(f'Historische Messdaten: {mindate:%d.%m.%Y} bis {maxdate:%d.%m.%Y} (UTC). Die Bewertung erfolgt relativ zum letzten vorhandenen Datensatz, **nicht** zur aktuellen Uhrzeit.')
+st.info(f"Historische Messdaten: {mindate} bis {maxdate} (UTC). Die Bewertung erfolgt relativ zum letzten vorhandenen Datensatz, nicht zur aktuellen Uhrzeit.")
 with st.sidebar:
  st.header('⚙️ Prüfregeln')
  signal_limit=st.slider('RSSI-Warnschwelle (dBm)',-130,-70,-110)
