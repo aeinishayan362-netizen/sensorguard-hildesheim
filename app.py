@@ -1,129 +1,103 @@
-import streamlit as st
-import pandas as pd
+from pathlib import Path
 import numpy as np
-from datetime import datetime, timedelta
+import pandas as pd
+import streamlit as st
 
-st.set_page_config(page_title="SensorGuard Hildesheim", page_icon="📡", layout="wide")
-st.title("📡 SensorGuard Hildesheim")
-st.caption("Frühwarnsystem für LoRaWAN-Sensoren · Demonstrator mit SYNTHETISCHEN Daten · keine reale Stadtanbindung")
+st.set_page_config(page_title='SensorGuard | Hildesheim',page_icon='📡',layout='wide')
+ROOT=Path(__file__).resolve().parent
+@st.cache_data(show_spinner='Lade echte Messdaten …')
+def load():
+    d=pd.read_csv(ROOT/'data/sensor_6h.csv.gz',parse_dates=['bin','first','last'])
+    for c in ['rssi','snr','battery_pct','battery_v','measurement']:
+        d[c]=pd.to_numeric(d[c],errors='coerce')
+    return d
 
-@st.cache_data
-def generate(seed=42):
-    rng=np.random.default_rng(seed)
-    rows=[]
-    scenarios={
-        'SG-001':('Innenstadt · Temperatur','gesund'),
-        'SG-002':('Innerste · Wasserstand','batterie'),
-        'SG-003':('Bahnhof · Luftqualität','signal'),
-        'SG-004':('Stadtpark · Bodenfeuchte','luecken'),
-        'SG-005':('Rathaus · Temperatur','gesund'),
-        'SG-006':('Nordstadt · Luftqualität','gesund'),
-        'SG-007':('Oststadt · Temperatur','batterie'),
-        'SG-008':('Südstadt · Bodenfeuchte','gesund'),
-        'SG-009':('Moritzberg · Wasserstand','signal'),
-        'SG-010':('Itzum · Temperatur','gesund'),
-        'SG-011':('Drispenstedt · Luftqualität','luecken'),
-        'SG-012':('Himmelsthür · Temperatur','gesund'),
-    }
-    start=pd.Timestamp('2026-11-17 08:00')
-    for sid,(location,scenario) in scenarios.items():
-        base_battery=float(rng.uniform(65,95))
-        for hour in range(72):
-            t=start+pd.Timedelta(hours=hour)
-            battery=base_battery-0.035*hour+rng.normal(0,0.4)
-            rssi=-83+rng.normal(0,2.5)
-            interval=60+rng.normal(0,2)
-            if scenario=='batterie':
-                battery-=0.75*hour
-            if scenario=='signal':
-                rssi-=0.42*hour
-            if scenario=='luecken':
-                interval+=max(0,hour-28)*1.25
-            rows.append({'sensor_id':sid,'standort':location,'timestamp':t,'battery_pct':round(float(np.clip(battery,0,100)),2),'rssi_dbm':round(float(rssi),2),'interval_min':round(float(max(1,interval)),2),'szenario':scenario})
-    return pd.DataFrame(rows)
+def assess(g,now,gap_factor,signal_limit):
+    g=g.sort_values('bin'); latest=g.iloc[-1]; sid=str(latest.sensor_id)
+    intervals=g['bin'].diff().dt.total_seconds().div(3600).dropna()
+    typical=float(intervals[intervals>0].median()) if len(intervals[intervals>0]) else np.nan
+    gap=float((now-latest['last']).total_seconds()/3600)
+    reasons=[];score=0
+    if np.isfinite(typical) and gap>max(24,typical*gap_factor):reasons.append(f'Keine Meldung seit {gap:.0f} h (üblicher Abstand der belegten Zeitfenster: {typical:.0f} h)');score+=45
+    if pd.notna(latest.rssi) and latest.rssi<signal_limit:reasons.append(f'Schwaches RSSI: {latest.rssi:.1f} dBm');score+=25
+    if pd.notna(latest.snr) and latest.snr < -12:reasons.append(f'Niedriges SNR: {latest.snr:.1f} dB');score+=20
+    if pd.notna(latest.battery_pct) and 0<=latest.battery_pct<=20:reasons.append(f'Niedriger gemeldeter Batteriestand: {latest.battery_pct:.1f} %');score+=30
+    # heuristic for frozen values: only when multiple populated consecutive bins, not a diagnosis
+    recent=g.tail(8).measurement.dropna()
+    if len(recent)>=6 and recent.nunique()==1:reasons.append('Unveränderter Messwert in mindestens sechs 6-Stunden-Fenstern (prüfen)');score+=15
+    status='Rot' if score>=40 else 'Gelb' if score>=20 else 'Grün'
+    return {'sensor_id':sid,'typ':latest.typ,'status':status,'risiko_punkte':score,'letzte_meldung':latest['last'],'stunden_seit_meldung':round(gap,1),'rssi_dbm':latest.rssi,'snr_db':latest.snr,'batterie_prozent':latest.battery_pct,'batterie_volt':latest.battery_v,'beobachtungen':int(g['count'].sum()),'grund':'; '.join(reasons) if reasons else 'Keine Auffälligkeit nach den gewählten Regeln','empfehlung':'Datenverbindung und Gerät prüfen' if score>=40 else 'Messverlauf beobachten' if score>=20 else 'Keine unmittelbare Maßnahme'}
 
-def assess(df, threshold=35):
-    result=[]
-    for sid,g in df.sort_values('timestamp').groupby('sensor_id'):
-        g=g.sort_values('timestamp')
-        first,last=g.iloc[0],g.iloc[-1]
-        days=max((last.timestamp-first.timestamp).total_seconds()/86400,0.01)
-        drain=max(0,(first.battery_pct-last.battery_pct)/days)
-        signal_change=float(last.rssi_dbm-first.rssi_dbm)
-        interval=float(g.tail(6).interval_min.median())
-        score=0; reasons=[]
-        if last.battery_pct<25: score+=35;reasons.append('Batterie unter 25 %')
-        if drain>10: score+=35;reasons.append(f'Batterieverlust {drain:.1f} Prozentpunkte/Tag')
-        if last.rssi_dbm<-105: score+=20;reasons.append('Schwaches Empfangssignal')
-        if signal_change<-15: score+=25;reasons.append('Signal verschlechtert sich deutlich')
-        if interval>85: score+=35;reasons.append('Meldeintervalle werden länger')
-        score=min(100,score)
-        if score>=threshold: status='Kritisch'
-        elif score>=30: status='Beobachten'
-        else: status='Normal'
-        result.append({'sensor_id':sid,'standort':last.standort,'batterie_%':round(last.battery_pct,1),'signal_dBm':round(last.rssi_dbm,1),'intervall_min':round(interval,1),'verlust_pp_tag':round(drain,1),'risiko_score':score,'status':status,'gruende':'; '.join(reasons) if reasons else 'Keine Auffälligkeit','szenario':last.szenario})
-    return pd.DataFrame(result).sort_values(['risiko_score','sensor_id'],ascending=[False,True])
+def forecast(g):
+    # battery % forecast only; voltage is NOT a percent, no fabricated conversion
+    p=g[['bin','battery_pct']].dropna().sort_values('bin').tail(35)
+    if len(p)<8:return 'Nicht möglich: zu wenige Prozentwerte'
+    if p.bin.max()-p.bin.min()<pd.Timedelta(days=7):return 'Nicht möglich: Zeitraum unter 7 Tagen'
+    x=(p.bin-p.bin.min()).dt.total_seconds().to_numpy()/86400
+    y=p.battery_pct.to_numpy(dtype=float)
+    if np.nanmin(y)<0 or np.nanmax(y)>100:return 'Nicht möglich: ungültige Prozentwerte'
+    slope=float(np.polyfit(x,y,1)[0]);pred=np.polyval(np.polyfit(x,y,1),x)
+    if slope>=-0.02:return 'Keine belastbare Abnahme erkennbar'
+    if np.std(y-pred)>max(5,np.ptp(y)*0.4):return 'Zu stark schwankender Batterieverlauf'
+    days=(float(y[-1])-20)/(-slope)
+    if days<0:return '20-%-Grenze bereits unterschritten'
+    if days>365:return 'Prognose über 365 Tage: zu unsicher'
+    return f'20-%-Schwelle in ungefähr {days:.0f} Tagen (lineare Extrapolation, keine Garantie)'
 
-st.sidebar.header('Steuerung')
-threshold=st.sidebar.slider('Warnschwelle (Punkte)',30,70,35,5)
-st.sidebar.info('Die Risikopunkte sind erklärbare Heuristiken, keine statistischen Ausfallwahrscheinlichkeiten.')
-upload=st.sidebar.file_uploader('Optional: eigene CSV importieren',type='csv')
-if upload:
-    try:
-        df=pd.read_csv(upload)
-        required={'sensor_id','standort','timestamp','battery_pct','rssi_dbm','interval_min'}
-        missing=required-set(df.columns)
-        if missing: raise ValueError('Fehlende Spalten: '+', '.join(sorted(missing)))
-        df['timestamp']=pd.to_datetime(df['timestamp'],errors='raise')
-        for c in ['battery_pct','rssi_dbm','interval_min']: df[c]=pd.to_numeric(df[c],errors='raise')
-        df['szenario']='unbekannt'
-        if df.empty or df.isna().any().any(): raise ValueError('Leere oder fehlende Werte in CSV')
-        source='Hochgeladene CSV (Herkunft vom Nutzer zu prüfen)'
-    except Exception as exc:
-        st.error(f'CSV konnte nicht verarbeitet werden: {exc}')
-        st.stop()
-else:
-    df=generate()
-    source='Simulierte Demonstrationsdaten'
-summary=assess(df,threshold)
-critical=int((summary.status=='Kritisch').sum())
-watch=int((summary.status=='Beobachten').sum())
-cols=st.columns(4)
-for col,label,value in zip(cols,['Sensoren','Kritisch','Beobachten','Normal'],[len(summary),critical,watch,int((summary.status=='Normal').sum())]):
-    col.metric(label,value)
-st.subheader('Sensorübersicht')
-st.dataframe(summary[['sensor_id','standort','batterie_%','signal_dBm','intervall_min','risiko_score','status','gruende']],use_container_width=True,hide_index=True)
-selected=st.selectbox('Sensor für Detailanalyse wählen',summary.sensor_id.tolist())
-g=df[df.sensor_id==selected].sort_values('timestamp')
-r=summary[summary.sensor_id==selected].iloc[0]
-st.subheader(f'Detailanalyse · {selected}')
-st.write(f"**Standort:** {r['standort']} · **Status:** {r['status']} · **Risikoscore:** {r['risiko_score']}/100")
-st.write('**Erkannte Ursachen:** '+r['gruende'])
-c1,c2,c3=st.columns(3)
-with c1:
-    st.caption('Batterie (%)')
-    st.line_chart(g.set_index('timestamp')['battery_pct'])
-with c2:
-    st.caption('Signalstärke (dBm; niedriger = schwächer)')
-    st.line_chart(g.set_index('timestamp')['rssi_dbm'])
-with c3:
-    st.caption('Meldeintervall (Minuten)')
-    st.line_chart(g.set_index('timestamp')['interval_min'])
-if r['status']=='Kritisch':
-    st.error('⚠️ Wartung prüfen: '+r['gruende']+'. Zuerst Sensordaten und Empfang prüfen; anschließend bei Bedarf Vor-Ort-Einsatz planen.')
-elif r['status']=='Beobachten':
-    st.warning('Entwicklung beobachten und bei erneuter Auffälligkeit prüfen.')
-else:
-    st.success('Aktuell keine Warnung gemäß den Demo-Regeln.')
-st.subheader('Validierung an simulierten Fällen')
-if not upload:
-    expected=summary.szenario.ne('gesund')
-    predicted=summary.status.eq('Kritisch')
-    tp=int((expected&predicted).sum());fp=int((~expected&predicted).sum())
-    fn=int((expected&~predicted).sum());tn=int((~expected&~predicted).sum())
-    st.write(f'Korrekt erkannte Fehlerszenarien: **{tp}** · Fehlalarme: **{fp}** · Übersehene Fehlerszenarien: **{fn}** · Korrekt unauffällig: **{tn}**')
-    st.caption('Die Szenarien wurden gezielt erzeugt. Das ist ein Funktionstest, keine unabhängige Messung der Vorhersagegüte an echten Sensoren.')
-else:
-    st.info('Für importierte Daten liegen keine bestätigten Fehlerlabels vor. Daher wird keine Validierungskennzahl behauptet.')
-st.download_button('Ergebnis als CSV herunterladen',summary.to_csv(index=False).encode('utf-8'),'sensorguard_ergebnisse.csv','text/csv')
-st.caption('Quelle: '+source+' · Stand: Prototyp · Kein Zugriff auf städtische Sensoren · Keine automatische Benachrichtigung an die Stadt')
+st.title('📡 SensorGuard Hildesheim')
+st.caption('Challenge 3 · Frühwarnsystem auf Basis der bereitgestellten Hackathon-Messdaten · historische Daten, keine Live-Stadtanbindung')
+d=load()
+maxdate=d['last'].max();mindate=d['first'].min()
+st.info(f'Historische Messdaten: {mindate:%d.%m.%Y} bis {maxdate:%d.%m.%Y} (UTC). Die Bewertung erfolgt relativ zum letzten vorhandenen Datensatz, **nicht** zur aktuellen Uhrzeit.')
+with st.sidebar:
+ st.header('⚙️ Prüfregeln')
+ signal_limit=st.slider('RSSI-Warnschwelle (dBm)',-130,-70,-110)
+ gap_factor=st.slider('Lückenfaktor gegenüber typischem Abstand',2.0,8.0,3.0,0.5)
+ types=st.multiselect('Sensortypen',sorted(d.typ.unique()),default=sorted(d.typ.unique()))
+ st.caption('Regeln sind konfigurierbare Heuristiken, keine kalibrierten Ausfallwahrscheinlichkeiten.')
+ st.warning('Kein Frame Counter in den gelieferten Tabellen: tatsächliche Paketverlustrate kann nicht seriös berechnet werden.')
+filtered=d[d.typ.isin(types)]
+if filtered.empty:st.warning('Bitte mindestens einen Typ wählen.');st.stop()
+# Grouped 6-hour windows are a compressed representation of actual measurements
+rows=[assess(g,maxdate,gap_factor,signal_limit) for _,g in filtered.groupby(['typ','sensor_id'],sort=False)]
+res=pd.DataFrame(rows).sort_values(['risiko_punkte','stunden_seit_meldung'],ascending=[False,False])
+a,b,c,e=st.columns(4)
+a.metric('Sensoren',len(res));b.metric('🔴 Prüfen',int((res.status=='Rot').sum()));c.metric('🟡 Beobachten',int((res.status=='Gelb').sum()));e.metric('🟢 Unauffällig',int((res.status=='Grün').sum()))
+t1,t2,t3,t4=st.tabs(['🚦 Sensorübersicht','🔎 Einzelanalyse','📍 Gateways','🧪 Datenqualität & Methodik'])
+with t1:
+ st.subheader('Priorisierte Wartungsliste')
+ st.caption('Priorität aus transparenten Warnregeln. Ein roter Status ist ein Prüfhinweis, kein bestätigter Defekt.')
+ q=st.selectbox('Status filtern',['Alle','Rot','Gelb','Grün'])
+ view=res if q=='Alle' else res[res.status==q]
+ st.dataframe(view[['sensor_id','typ','status','risiko_punkte','letzte_meldung','stunden_seit_meldung','rssi_dbm','snr_db','batterie_prozent','grund','empfehlung']],hide_index=True,use_container_width=True)
+ st.download_button('📥 Wartungsliste als CSV',view.to_csv(index=False).encode('utf-8-sig'),'sensorguard_wartungsliste.csv','text/csv')
+with t2:
+ options=(res['typ']+' | '+res['sensor_id']).tolist()
+ selected=st.selectbox('Sensor auswählen',options)
+ typ,sid=selected.split(' | ',1)
+ g=filtered[(filtered.typ==typ)&(filtered.sensor_id.astype(str)==sid)].sort_values('bin')
+ r=res[(res.typ==typ)&(res.sensor_id.astype(str)==sid)].iloc[0]
+ st.write(f"**Status: {r.status}** · {r.grund}")
+ st.write(f"**Batterieprognose:** {forecast(g)}")
+ st.caption('Nur aus tatsächlich gemeldeten Batterie-Prozentwerten. Spannung in Volt wird nicht willkürlich in Prozent umgerechnet.')
+ metric=st.selectbox('Messverlauf',['rssi','snr','battery_pct','battery_v','measurement','count'])
+ chart=g[['bin',metric]].dropna().set_index('bin')
+ if chart.empty:st.warning('Für diesen Sensor liegen keine Werte für diese Messgröße vor.')
+ else:st.line_chart(chart)
+ st.caption('Die Kurven zeigen Medianwerte je 6-Stunden-Fenster (count = Anzahl Beobachtungen), keine interpolierten Rohdaten.')
+ st.subheader('Beobachtete Übertragungslücken')
+ gaps=g['bin'].diff().dt.total_seconds().div(3600).dropna()
+ st.write(f'Größter Abstand zwischen belegten 6-Stunden-Fenstern: **{gaps.max():.0f} Stunden**' if len(gaps) else 'Nicht genug Daten für eine Lückenanalyse.')
+ st.warning('Eine Messlücke ist kein beweisbarer Paketverlust. Ohne Frame Counter oder bekannte Sendeintervalle ist keine echte Paketverlustquote berechenbar.')
+with t3:
+ gateways=pd.read_csv(ROOT/'data/gateways.csv')
+ st.subheader('Offizielle Gateway-Standorte')
+ st.map(gateways,latitude='lat',longitude='long',zoom=11)
+ st.dataframe(gateways,hide_index=True,use_container_width=True)
+ st.caption('Die Daten enthalten Gateway-Koordinaten, aber keine belastbare Zuordnung jedes Sensors zu einem Gateway. Keine Funkabdeckung wird behauptet.')
+ st.image(str(ROOT/'data/Gateway_Karte.png'),caption='Von den Veranstaltern bereitgestellte Gateway-Karte')
+with t4:
+ st.subheader('Datenprofil')
+ st.dataframe(pd.read_csv(ROOT/'data/datenprofil.csv'),hide_index=True,use_container_width=True)
+ st.markdown('''**Methodik:** Originale Rohdatensätze wurden ohne erfundene Messwerte in 6-Stunden-Zeitfenster zusammengefasst. Die Zahl der Beobachtungen und Mediane sind aus den bereitgestellten CSV-Dateien berechnet. Die Zeitfensteraggregation kann kurze Ausfälle verbergen. Warnregeln für RSSI, SNR, Meldelücken und gemeldeten Batteriestand sind demonstrative Heuristiken, keine amtlichen Grenzwerte.\n\n**Grenzen:** Kein Frame Counter, keine validierte Paketverlustrate, keine sichere Geräte-Gateway-Zuordnung, keine echte automatische Alarmzustellung, keine unabhängig validierte Vorhersagegenauigkeit. Batterieprognosen nur bei ausreichend langen, plausiblen Prozent-Zeitreihen. ''')
+ st.download_button('📥 Aggregierte Messdaten herunterladen',(ROOT/'data/sensor_6h.csv.gz').read_bytes(),'sensor_6h.csv.gz','application/gzip')
