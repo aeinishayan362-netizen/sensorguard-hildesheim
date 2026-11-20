@@ -56,7 +56,7 @@ st.markdown('''<div class="hero"><small>HIZUKUNFT · DATEN-HACKATHON 2026 · CHA
 st.caption('Analyse historischer Veranstalterdaten · keine Live-Anbindung · Warnungen sind Prüfhinweise, keine bestätigten Defekte')
 d=load()
 maxdate=d['last'].max();mindate=d['first'].min()
-st.info(f'📅 Datenstand: {mindate:%d.%m.%Y} – {maxdate:%d.%m.%Y} (UTC) · Referenzzeitpunkt ist der letzte Datensatz, nicht die aktuelle Uhrzeit.')
+st.info(f"📅 Datenstand: {pd.to_datetime(mindate).strftime('%d.%m.%Y')} – {pd.to_datetime(maxdate).strftime('%d.%m.%Y')} (UTC) · Referenzzeitpunkt ist der letzte Datensatz, nicht die aktuelle Uhrzeit.")
 with st.sidebar:
  st.header('⚙️ Prüfregeln')
  signal_limit=st.slider('RSSI-Warnschwelle (dBm)',-130,-70,-110)
