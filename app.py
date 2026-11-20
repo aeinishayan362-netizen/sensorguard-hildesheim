@@ -16,7 +16,7 @@ def assess(g,now,gap_factor,signal_limit):
     g=g.sort_values('bin'); latest=g.iloc[-1]; sid=str(latest.sensor_id)
     intervals=g['bin'].diff().dt.total_seconds().div(3600).dropna()
     typical=float(intervals[intervals>0].median()) if len(intervals[intervals>0]) else np.nan
-    gap=float((pd.to_datetime(now, utc=True)-pd.to_datetime(last['last'], utc=True)).total_seconds()/3600)
+    gap = float((pd.to_datetime(now, utc=True) - pd.to_datetime(last['last'], utc=True)).total_seconds() / 3600)
     reasons=[];score=0
     if np.isfinite(typical) and gap>max(24,typical*gap_factor):reasons.append(f'Keine Meldung seit {gap:.0f} h (üblicher Abstand der belegten Zeitfenster: {typical:.0f} h)');score+=45
     if pd.notna(latest.rssi) and latest.rssi<signal_limit:reasons.append(f'Schwaches RSSI: {latest.rssi:.1f} dBm');score+=25
